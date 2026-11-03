@@ -1,0 +1,11 @@
+# Researcher Detachable Repository .gitignore
+Vault/
+Temp/
+logs/
+Exports/
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+.obsidian/
+
