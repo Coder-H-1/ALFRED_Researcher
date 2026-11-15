@@ -4,6 +4,7 @@ Handles thread-locked storage, retrieval, and global access for Obsidian markdow
 """
 
 import os
+import sys
 import re
 import json
 import threading
@@ -23,9 +24,19 @@ except (ImportError, ValueError):
         logger = logging.getLogger(__name__)
 
 # Default vault folder: Prefer root workspace Vault (alongside main.py) for easy accessibility
-_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PARENT_ROOT = os.path.abspath(os.path.join(_CURRENT_DIR, ".."))
-if os.path.isfile(os.path.join(_PARENT_ROOT, "main.py")):
+if getattr(sys, "frozen", False):
+    _EXE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.basename(_EXE_DIR).lower() == "bin":
+        _RESEARCHER_DIR = os.path.dirname(_EXE_DIR)
+        _PARENT_ROOT = os.path.dirname(_RESEARCHER_DIR)
+    else:
+        _PARENT_ROOT = os.path.dirname(_EXE_DIR)
+    _CURRENT_DIR = _PARENT_ROOT
+else:
+    _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+    _PARENT_ROOT = os.path.abspath(os.path.join(_CURRENT_DIR, ".."))
+
+if os.path.isdir(os.path.join(_PARENT_ROOT, "Vault")) or os.path.isfile(os.path.join(_PARENT_ROOT, "main.py")):
     DEFAULT_VAULT_DIR = os.path.join(_PARENT_ROOT, "Vault")
 else:
     DEFAULT_VAULT_DIR = os.path.join(_CURRENT_DIR, "Vault")
@@ -109,7 +120,9 @@ class ObsidianVault:
             if any(bad in w_lower for bad in (
                 "dark mode", "sign in", "web source", "source reference", 
                 "topic analysis", "deep sub", "theoretical foundation", 
-                "primary knowledge base", "incremental analysis", "integrated empirical"
+                "primary knowledge base", "incremental analysis", "integrated empirical",
+                "underlying theories", "client challenge", "maths formulas", "physics formulas",
+                "electrophilic aromatic sub", "study material", "revision guide", "cbse notes"
             )):
                 continue
             seen.add(w_lower)
@@ -118,6 +131,16 @@ class ObsidianVault:
         link_section = ""
         if clean_links:
             link_section = "\n\n## Related Entities\n" + "\n".join(f"- [[{link}]]" for link in clean_links)
+
+        try:
+            from .synthesizer import sanitize_and_balance_math
+            content_cleaned = sanitize_and_balance_math(content_cleaned)
+        except Exception:
+            try:
+                from synthesizer import sanitize_and_balance_math
+                content_cleaned = sanitize_and_balance_math(content_cleaned)
+            except Exception:
+                pass
 
         full_document = "\n".join(frontmatter_lines) + content_cleaned + link_section + "\n"
 

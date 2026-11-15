@@ -8,6 +8,7 @@ and zero-gap print layout without orphan page breaks.
 """
 
 import os
+import sys
 import re
 import html
 import subprocess
@@ -27,7 +28,14 @@ except (ImportError, ValueError):
 
 from .obsidian import global_fetch_obsidian_data, fetch_from_obsidian, _DEFAULT_VAULT
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Exports")
+if getattr(sys, "frozen", False):
+    _EXE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.basename(_EXE_DIR).lower() == "bin":
+        OUTPUT_DIR = os.path.join(os.path.dirname(_EXE_DIR), "Exports")
+    else:
+        OUTPUT_DIR = os.path.join(_EXE_DIR, "Exports")
+else:
+    OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Exports")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 

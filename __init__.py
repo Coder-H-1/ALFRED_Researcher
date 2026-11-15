@@ -28,6 +28,13 @@ from .obsidian import (
 from .synthesizer import synthesize_and_update
 from .showcase import generate_web_view
 from .pipeline import ResearchPipeline
+from .llm_manager import (
+    ResearcherLLM,
+    ResearchContextManager,
+    ResearchSynthesizer,
+    get_researcher_llm,
+    unload_researcher_llm
+)
 
 __all__ = [
     # Function 1
@@ -57,5 +64,11 @@ __all__ = [
     # Showcase & Pipeline
     "ObsidianVault",
     "generate_web_view",
-    "ResearchPipeline"
+    "ResearchPipeline",
+    # LLM Manager
+    "ResearcherLLM",
+    "ResearchContextManager",
+    "ResearchSynthesizer",
+    "get_researcher_llm",
+    "unload_researcher_llm"
 ]

@@ -21,11 +21,32 @@ except (ImportError, ValueError):
         logger = logging.getLogger(__name__)
 
 
+BINARY_EXTENSIONS = (
+    ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".bin",
+    ".docx", ".xlsx", ".pptx", ".mp3", ".mp4", ".avi", ".mkv",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"
+)
+
+STOP_WORDS = {
+    "class", "from", "with", "into", "that", "this", "what", "which",
+    "ncert", "cbse", "solutions", "solution", "notes", "books", "book",
+    "chapter", "session", "questions", "question", "guide", "guides",
+    "part", "textbook", "textbooks", "grade", "syllabus", "edition"
+}
+
+
 def is_valid_url(url: str) -> bool:
-    """Validate if string is a valid HTTP/HTTPS URL."""
+    """Validate if string is a valid HTTP/HTTPS URL and not a raw binary download."""
     try:
         parsed = urllib.parse.urlparse(url)
-        return bool(parsed.scheme in ("http", "https") and parsed.netloc)
+        if not (parsed.scheme in ("http", "https") and parsed.netloc):
+            return False
+        clean_path = parsed.path.lower()
+        if any(clean_path.endswith(ext) for ext in BINARY_EXTENSIONS):
+            return False
+        if any(bad in clean_path for bad in ("-notes-pdf", "sample-paper", "sample-papers", "download-pdf")):
+            return False
+        return True
     except Exception:
         return False
 
@@ -59,25 +80,41 @@ def filter_relevant_sublinks(
 ) -> List[Dict[str, str]]:
     """
     Filters and ranks on-page sub-links by semantic and keyword relevance to the topic.
-    Eliminates site boilerplate, social, courses, and job links.
+    Eliminates site boilerplate, syllabus directories, social, courses, and job links.
     """
-    # Tokenize topic into keywords (length >= 3)
-    topic_tokens = set(re.findall(r'[a-zA-Z]{3,}', topic.lower()))
+    # Tokenize topic into meaningful keywords (excluding stop words)
+    raw_tokens = set(re.findall(r'[a-zA-Z]{3,}', topic.lower()))
+    topic_tokens = {w for w in raw_tokens if w not in STOP_WORDS}
+    if not topic_tokens:
+        topic_tokens = raw_tokens
     
-    # Generic junk patterns to strictly reject
+    # Generic junk, bot challenge, and navigation patterns to strictly reject
     junk_patterns = re.compile(
         r'(job|course|tutorial|practice|login|sign[-_]?in|sign[-_]?up|register|'
         r'privacy|terms|cookie|contact|about|donate|feedback|account|cart|'
-        r'school[-_]?resources|share[-_]?experiences|notes[-_]?class)',
+        r'school[-_]?resources|share[-_]?experiences|notes[-_]?class|'
+        r'class[-_]?[0-9]|syllabus|curriculum|sample[-_]?papers|download[-_]?pdf|'
+        r'ncert[-_]?solutions|ncert[-_]?books|chapter[-_]?list|'
+        r'client[-_ ]?challenge|access[-_ ]?denied|attention[-_ ]?required|'
+        r'just[-_ ]?a[-_ ]?moment|captcha|security[-_ ]?check|cloudflare)',
         re.IGNORECASE
     )
 
     scored_links = []
     seen_urls = set()
 
+    # Determine broad topic domain to prevent cross-contamination
+    topic_lower = topic.lower()
+    is_chem = any(k in topic_lower for k in ("chem", "halo", "alkane", "arene", "organic", "compound", "reaction", "acid", "biomolecule"))
+    is_phys = any(k in topic_lower for k in ("phys", "electromagnet", "induction", "optics", "quantum", "mechanics", "flux"))
+
     for item in candidate_links:
         title = item.get("title", "").strip()
-        url = item.get("url", "").strip()
+        raw_url = item.get("url", "").strip()
+        if not raw_url:
+            continue
+        # Strip tracking queries and fragments (e.g. #b-o4dwteqs) to avoid re-scraping the same page
+        url = clean_url(raw_url)
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
@@ -87,23 +124,49 @@ def filter_relevant_sublinks(
         if junk_patterns.search(combined_text):
             continue
 
+        # Reject cross-domain formula/sidebar links (e.g. Maths/Physics links when researching Chemistry)
+        if is_chem and any(bad in combined_text for bad in ("physics-formula", "maths-formula", "math-formula", "physics_formula", "maths_formula")):
+            continue
+        if is_phys and any(bad in combined_text for bad in ("chemistry-formula", "maths-formula", "math-formula")):
+            continue
+
         # Score relevance based on keyword overlap
-        score = 0
+        topic_score = 0
         for token in topic_tokens:
             if token in title.lower():
-                score += 3
+                topic_score += 4
             if token in url.lower():
-                score += 2
+                topic_score += 3
 
-        # Physics / Science / Domain related affinity bonus
-        domain_bonuses = ("law", "theory", "formula", "principle", "experiment", "force", 
-                          "energy", "field", "flux", "induction", "motion", "mechanics")
+        # Domain affinity bonuses per scientific branch
+        domain_bonuses = []
+        if is_chem:
+            domain_bonuses.extend([
+                "mechanism", "substitution", "elimination", "synthesis", "reaction",
+                "preparation", "properties", "isomerism", "structure", "stereochemistry",
+                "kinetics", "carbocation", "nucleophile", "electrophile", "haloalkane",
+                "haloarene", "halide", "compound", "bonding", "acid"
+            ])
+        if is_phys:
+            domain_bonuses.extend([
+                "law", "theory", "flux", "field", "induction", "force", "energy",
+                "electromagnet", "magnetic", "circuit", "current", "faraday", "lenz",
+                "maxwell", "voltage", "emf", "motion", "mechanics"
+            ])
+        if not is_chem and not is_phys:
+            domain_bonuses.extend([
+                "law", "theory", "principle", "experiment", "force", "energy",
+                "structure", "mechanism", "synthesis", "properties"
+            ])
+
+        bonus_score = 0
         for bonus in domain_bonuses:
-            if bonus in title.lower():
-                score += 1
+            if bonus in title.lower() or bonus in url.lower():
+                bonus_score += 1
 
-        if score > 0:
-            scored_links.append((score, item))
+        total_score = topic_score + bonus_score
+        if total_score > 0 and (topic_score > 0 or bonus_score >= 1):
+            scored_links.append((total_score, item))
 
     # Sort descending by relevance score
     scored_links.sort(key=lambda x: x[0], reverse=True)

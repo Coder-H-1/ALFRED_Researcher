@@ -17,8 +17,15 @@ _FORMATTER = logging.Formatter(
 )
 
 
+class FlushingRotatingFileHandler(RotatingFileHandler):
+    """Ensures log file writes are immediately flushed to disk."""
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
 def get_logger(name: str = "Researcher") -> logging.Logger:
-    """Returns a configured logger with console and rotating file handlers."""
+    """Returns a configured logger with console and auto-flushing rotating file handlers."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.setLevel(logging.INFO)
@@ -29,8 +36,8 @@ def get_logger(name: str = "Researcher") -> logging.Logger:
         c_handler.setFormatter(_FORMATTER)
         logger.addHandler(c_handler)
 
-        # File handler
-        f_handler = RotatingFileHandler(
+        # File handler with instant flush
+        f_handler = FlushingRotatingFileHandler(
             _LOG_FILE,
             maxBytes=5 * 1024 * 1024,
             backupCount=3,

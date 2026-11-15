@@ -33,28 +33,201 @@ UI_NOISE_PATTERNS = [
     r'^\s*[-*•]?\s*(Cookie policy|Privacy policy|Terms of service|Terms of use|Disclaimer|All rights reserved).*$',
     r'^\s*[-*•]?\s*(Follow us on|Connect with us|Subscribe|Newsletter|Advertisement|Sponsored).*$',
     r'^\s*[-*•]?\s*The Wayback Machine\b.*$',
-    r'^\s*\[\d+\s+captures\].*$'
+    r'^\s*\[\d+\s+captures\].*$',
+    r'^\s*[-*•]?\s*(Toggle\s+.*?(subsection|table of contents))\s*$',
+    r'^\s*[-*•]?\s*(\d+\s+languages)\s*$',
+    r'^\s*[-*•]?\s*(Navigation|Search|Print/export|Printable version|In other projects|General|Tools|Actions)\s*$',
+    r'^\s*[-*•]?\s*(Small|Standard|Large|Wide|Automatic|Light|Dark)\s*$',
+    r'^\s*This page always uses small font size.*$',
+    r'^\s*The content is as wide as possible.*$',
+    r'^\s*Skip to chapter text\s*$',
+    r'^\s*Check\s+Show answer\b.*$',
+    r'^\s*Show step \d+\b.*$',
+    r'^\s*Show full solution\b.*$',
+    r'^\s*Try it yourself first\b.*$',
+    r'^\s*Tap an item on the left.*$',
+    r'^\s*Match each ligand with its denticity.*$',
+    r'^\s*Recommended:\s*Buy the Printed NCERT.*$',
+    r'^\s*Contains Amazon affiliate links\b.*$',
+    r'^\s*Check the latest price on Amazon\b.*$',
+    r'^\s*Buy on Amazon\b.*$',
+    r'^\s*Price and availability may change.*$',
+    r'^\s*As an Amazon Associate.*$',
+    r'^\s*Written by\s+[A-Z][a-z]+.*$',
+    r'^\s*NCERTBooks\.org is an independent.*$',
+    r'^\s*📄 Want this offline\? Download the free PDF.*$',
+    r'^\s*NCERT Books-\s*\d+\s*to\s*\d+.*$',
+    r'^\s*Class \d+ NCERT Books.*$',
+    r'^\s*Continue Practising\s*—\s*NCERT Solutions.*$',
+    r'^\s*NCERT Solutions for Class\s+(?:[6-9]|1[0-2]).*$',
+    r'^\s*Class\s+(?:[6-9]|1[0-2])\s+collections?:.*$',
+    r'^\s*(?:English|Maths|Science|Hindi|Sanskrit|Social Science|Accountancy|Economics|History|Geography)\s*[–—-].*$',
+    r'^\s*Existing NCERT books continue in.*$',
+    r'^\s*Complete solutions to the Class.*$',
+    r'^\s*Chapter-wise solutions to.*$',
+    r'^\s*Step-by-step solutions to every example.*$',
+    r'^\s*Looking for a specific chapter\?.*$',
+    r'^\s*ClearStudy is an independent resource.*$',
+    r'^\s*FAQs about NCERT Solutions.*$',
+    r'^\s*Match the class, book title, part and chapter.*$',
+    r'^\s*Attempt the questions first, compare your reasoning.*$'
 ]
 _COMPILED_UI_NOISE = re.compile("|".join(f"(?:{p})" for p in UI_NOISE_PATTERNS), re.IGNORECASE)
 
 # Junk patterns in hyperlinks that must be purged
 JUNK_LINK_URL_OR_TEXT = re.compile(
     r'(course|tutorial|practice|job|login|signin|signup|donate|special:|'
-    r'wayback|web\.archive\.org|captures|createaccount|userlogin|privacy|terms)',
+    r'wayback|web\.archive\.org|captures|createaccount|userlogin|privacy|terms|amazon\.com|ncertbooks\.org.*affiliate)',
     re.IGNORECASE
 )
+
+
+def convert_mathml_and_katex(text: str) -> str:
+    """
+    Converts KaTeX and MathML XML structures into standard LaTeX equations ($ ... $ or $$ ... $$).
+    Eliminates phantom markers, mangled chemical formulas, and broken spaces.
+    """
+    if not text:
+        return ""
+
+    # 1. First check if KaTeX annotation block with raw TeX is present
+    def _replace_annotation(match):
+        tex = match.group(1).strip()
+        return f" ${tex}$ " if tex else " "
+
+    text = re.sub(
+        r'<span[^>]*class=["\'][^"\']*katex[^"\']*["\'][^>]*>.*?<annotation[^>]*encoding=["\']application/x-tex["\'][^>]*>(.*?)</annotation>.*?</span>',
+        _replace_annotation,
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
+    # 2. Convert <math>...</math> blocks (e.g. from ncert.ai, Wikipedia)
+    def _clean_math_block(match):
+        raw = match.group(0)
+        # Strip phantom alignment elements (<mphantom>X</mphantom>)
+        t = re.sub(r'<mphantom>.*?</mphantom>', '', raw, flags=re.DOTALL)
+        # Handle msub with mpadded or plain
+        t = re.sub(r'<msub>\s*(.*?)\s*<mpadded[^>]*>\s*<m[no]>(.*?)</m[no]>\s*</mpadded>\s*</msub>', r'\1_{\2}', t, flags=re.DOTALL)
+        t = re.sub(r'<msub>\s*(.*?)\s*<m[no]>(.*?)</m[no]>\s*</msub>', r'\1_{\2}', t, flags=re.DOTALL)
+        # Handle msup with mpadded or plain
+        t = re.sub(r'<msup>\s*(.*?)\s*<mpadded[^>]*>\s*(?:<mrow>)?(.*?)(?:</mrow>)?\s*</mpadded>\s*</msup>', r'\1^{\2}', t, flags=re.DOTALL)
+        t = re.sub(r'<msup>\s*(.*?)\s*<m[no]>(.*?)</m[no]>\s*</msup>', r'\1^{\2}', t, flags=re.DOTALL)
+        # Strip all other MathML tags
+        t = re.sub(r'</?(?:math|mrow|mi|mn|mo|mtext|mpadded|span|mstyle)[^>]*>', '', t)
+        # Decode HTML entities
+        t = html.unescape(t)
+        # Collapse internal spaces
+        t = re.sub(r'\s+', '', t).strip()
+        if not t:
+            return ""
+        return f"${t}$"
+
+    text = re.sub(r'<math[^>]*>.*?</math>', _clean_math_block, text, flags=re.DOTALL | re.IGNORECASE)
+
+    # 3. Handle standard HTML <sub> and <sup>
+    text = re.sub(r'<sub[^>]*>(.*?)</sub>', r'_{ \1 }', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<sup[^>]*>(.*?)</sup>', r'^{ \1 }', text, flags=re.DOTALL | re.IGNORECASE)
+
+    return text
+
+
+def convert_html_tables_to_markdown(raw_html: str) -> str:
+    """Converts HTML <table> elements into GitHub Flavored Markdown tables."""
+    if not raw_html or "<table" not in raw_html.lower():
+        return raw_html
+
+    def _table_to_md(match):
+        table_html = match.group(0)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, flags=re.DOTALL | re.IGNORECASE)
+        if not rows:
+            return ""
+
+        table_data = []
+        for r in rows:
+            cells = re.findall(r'<(?:td|th)[^>]*>(.*?)</(?:td|th)>', r, flags=re.DOTALL | re.IGNORECASE)
+            cleaned_cells = []
+            for c in cells:
+                c_clean = re.sub(r'<[^>]+>', ' ', c)
+                c_clean = html.unescape(c_clean)
+                c_clean = re.sub(r'\s+', ' ', c_clean).strip()
+                cleaned_cells.append(c_clean.replace('|', r'\|'))
+            if any(cleaned_cells):
+                table_data.append(cleaned_cells)
+
+        if not table_data:
+            return ""
+
+        max_cols = max(len(row) for row in table_data)
+        normalized_data = [row + [""] * (max_cols - len(row)) for row in table_data]
+
+        header = normalized_data[0]
+        header_text = " ".join(header).lower()
+        # Reject non-scientific tables (school book catalogs, prose/poem lists, syllabus indexes)
+        if any(bad in header_text for bad in [
+            "prose", "poem", "syllabus", "cbse", "sample paper", 
+            "class 6", "class 7", "class 8", "class 9", "class 10", "class 11",
+            "textbook list", "download pdf", "book part", "school resource",
+            "unit | prose"
+        ]):
+            return ""
+
+        separator = ["---"] * max_cols
+        body = normalized_data[1:]
+
+        md_lines = ["\n"]
+        md_lines.append("| " + " | ".join(header) + " |")
+        md_lines.append("| " + " | ".join(separator) + " |")
+        for row in body:
+            md_lines.append("| " + " | ".join(row) + " |")
+        md_lines.append("\n")
+
+        return "\n".join(md_lines)
+
+    return re.sub(r'<table[^>]*>.*?</table>', _table_to_md, raw_html, flags=re.DOTALL | re.IGNORECASE)
+
+
+def reconstruct_chemical_formulas(text: str) -> str:
+    """
+    Heuristically repairs mangled chemical formulas and symbols where letters were spaced out
+    or MathML was flattened to plain text.
+    """
+    # 1. Superscript charges (e.g. "X 3 +" or "X 2 -" or "X −")
+    text = re.sub(r'\bX\s*([1-6])\s*([+\-\u2212])', r'^{\1\2}', text)
+    text = re.sub(r'\bX\s*([+\-\u2212])', r'^{\1}', text)
+    # 2. Subscript numbers (e.g. "X 3" -> "_3")
+    text = re.sub(r'\bX\s*(\d{1,2})\b', r'_{\1}', text)
+    # 3. Known chemical element pairs spaced out by MathML flattening
+    element_map = [
+        (r'\bC\s+o\b', 'Co'), (r'\bC\s+l\b', 'Cl'), (r'\bN\s+H\b', 'NH'),
+        (r'\bA\s+g\b', 'Ag'), (r'\bC\s+r\b', 'Cr'), (r'\bP\s+t\b', 'Pt'),
+        (r'\bZ\s+n\b', 'Zn'), (r'\bF\s+e\b', 'Fe'), (r'\bC\s+u\b', 'Cu'),
+        (r'\bI\s+r\b', 'Ir'), (r'\bR\s+h\b', 'Rh'), (r'\bN\s+i\b', 'Ni'),
+        (r'\bB\s+r\b', 'Br'), (r'\bS\s+O\b', 'SO'), (r'\bN\s+O\b', 'NO'),
+        (r'\bH\s+O\b', 'HO'), (r'\bC\s+O\b', 'CO'), (r'\bC\s+N\b', 'CN')
+    ]
+    for pattern, repl in element_map:
+        text = re.sub(pattern, repl, text)
+
+    return text
 
 
 def strip_html_tags(raw_html: str) -> str:
     """Removes script, style, comments, and boilerplate HTML tags while keeping structural text."""
     if not raw_html:
         return ""
+
+    # Convert KaTeX & MathML into LaTeX first before stripping tags
+    text = convert_mathml_and_katex(raw_html)
+
+    # Convert HTML tables to Markdown tables
+    text = convert_html_tables_to_markdown(text)
     
     # Preserve blockquotes as Markdown quotes before stripping
     text = re.sub(
         r'<blockquote[^>]*>(.*?)</blockquote>', 
         lambda m: f"\n> {m.group(1).strip()}\n", 
-        raw_html, 
+        text, 
         flags=re.DOTALL | re.IGNORECASE
     )
     
@@ -77,23 +250,35 @@ def strip_html_tags(raw_html: str) -> str:
     
     # Decode HTML entities
     text = html.unescape(text)
+
+    # Reconstruct chemical formulas that were damaged
+    text = reconstruct_chemical_formulas(text)
     return text
 
 
+JUNK_TITLES_RE = re.compile(
+    r'^(Client Challenge|Access Denied|Attention Required|Just a moment\.\.\.|Security Check|Cloudflare|'
+    r'403 Forbidden|404 Not Found|Untitled Document|Page Not Found|Sign In|Log In)$',
+    re.IGNORECASE
+)
+
+
 def extract_title(content: str, default: str = "Untitled Document") -> str:
-    """Extract document title from HTML or Markdown."""
-    # Try <title> tag
-    title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
-    if title_match:
-        t = re.sub(r'\s+', ' ', title_match.group(1)).strip()
-        if t:
-            return t
-    
-    # Try Markdown # Title
+    """Extract document title from HTML or Markdown, filtering out bot challenge junk."""
+    # 1. Try Markdown # Title first if it looks like a substantive subject title
     md_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
     if md_match:
         t = md_match.group(1).strip()
-        if t:
+        if t and not JUNK_TITLES_RE.match(t) and len(t) > 3:
+            return t
+
+    # 2. Try <title> tag
+    title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
+    if title_match:
+        t = re.sub(r'\s+', ' ', title_match.group(1)).strip()
+        # Clean common site suffixes (e.g. " | Learn CBSE", " - Free NCERT Notes")
+        t = re.sub(r'\s*[-|–—]\s*(LearnCBSE|AglaSem|Scribd|GeeksforGeeks|Wikipedia).*$', '', t, flags=re.IGNORECASE).strip()
+        if t and not JUNK_TITLES_RE.match(t) and len(t) > 3:
             return t
     
     return default

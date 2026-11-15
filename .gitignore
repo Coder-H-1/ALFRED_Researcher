@@ -1,11 +1,20 @@
 # Researcher Detachable Repository .gitignore
 Vault/
 Temp/
+Temps/
 logs/
 Exports/
+models/
+bin/
+build/
+dist/
+*.spec
+build_exe.py
+test_*.py
+*_test.py
+*.gguf
 __pycache__/
 *.py[cod]
 *$py.class
 *.log
 .obsidian/
-

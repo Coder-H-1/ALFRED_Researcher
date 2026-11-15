@@ -20,13 +20,19 @@ for p in (_WORKSPACE_ROOT, _BASE_DIR):
 try:
     from .pipeline import ResearchPipeline
     from .obsidian import _DEFAULT_VAULT
+    from .llm_manager import unload_researcher_llm
+    from .temp_manager import cleanup_topic_temp, cleanup_all_temp_storage
 except (ImportError, ValueError):
     try:
         from pipeline import ResearchPipeline
         from obsidian import _DEFAULT_VAULT
+        from llm_manager import unload_researcher_llm
+        from temp_manager import cleanup_topic_temp, cleanup_all_temp_storage
     except ImportError:
         from Researcher.pipeline import ResearchPipeline
         from Researcher.obsidian import _DEFAULT_VAULT
+        from Researcher.llm_manager import unload_researcher_llm
+        from Researcher.temp_manager import cleanup_topic_temp, cleanup_all_temp_storage
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("ResearcherMCPServer")
@@ -76,6 +82,19 @@ def handle_list_tools() -> dict:
                     },
                     "required": ["note_title"]
                 }
+            },
+            {
+                "name": "terminate_research",
+                "description": "Terminates research, unloads the model from RAM to free memory, and cleans temporary files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional specific topic whose Temp directory to clean. If omitted, cleans all active topic temp."
+                        }
+                    }
+                }
             }
         ]
     }
@@ -116,13 +135,34 @@ def handle_call_tool(name: str, arguments: dict) -> dict:
             content = f.read()
         return {"content": [{"type": "text", "text": content}]}
 
+    elif name == "terminate_research":
+        topic = arguments.get("topic")
+        try:
+            if unload_researcher_llm:
+                unload_researcher_llm()
+        except Exception as e:
+            logger.warning(f"Error unloading LLM: {e}")
+
+        import gc
+        gc.collect()
+
+        if topic and str(topic).strip():
+            clean_t = str(topic).strip()
+            cleaned = cleanup_topic_temp(clean_t)
+            msg = f"Terminated research for topic '{clean_t}'. Temp files cleaned: {cleaned}. Memory freed."
+        else:
+            summary = cleanup_all_temp_storage()
+            msg = f"Terminated all research. Cleaned {summary.get('cleaned_folders', 0)} temp topic folder(s). Memory freed."
+
+        return {"content": [{"type": "text", "text": msg}]}
+
     return {"error": f"Unknown tool: {name}"}
 
 
 def main():
     """Stdio JSON-RPC loop adhering to the Model Context Protocol."""
     for line in sys.stdin:
-        line = line.strip()
+        line = line.strip().lstrip('\ufeff')
         if not line:
             continue
         try:

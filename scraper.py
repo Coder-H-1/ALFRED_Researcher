@@ -5,6 +5,7 @@ Handles single, batch, and concurrent parallel fetching across multiple URLs.
 """
 
 import os
+import re
 import subprocess
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -73,8 +74,24 @@ def _fetch_via_obscura(url: str, timeout: int = 15) -> Optional[str]:
     return None
 
 
+BINARY_EXTENSIONS = (
+    ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".bin",
+    ".docx", ".xlsx", ".pptx", ".mp3", ".mp4", ".avi", ".mkv",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"
+)
+
+
+def _is_binary_url(url: str) -> bool:
+    clean = url.split("?")[0].split("#")[0].lower()
+    return any(clean.endswith(ext) for ext in BINARY_EXTENSIONS)
+
+
 def _fetch_via_http(url: str, timeout: int = 15) -> Optional[str]:
-    """Fallback fetcher using standard HTTP client."""
+    """Fallback fetcher using standard HTTP client with SSL fallback."""
+    if _is_binary_url(url):
+        logger.debug(f"Skipping binary URL: {url}")
+        return None
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -91,18 +108,60 @@ def _fetch_via_http(url: str, timeout: int = 15) -> Optional[str]:
             else:
                 logger.warning(f"HTTP GET {url} failed with status {resp.status_code}")
     except Exception as e:
-        logger.error(f"HTTP fetch error for {url}: {e}")
+        err_str = str(e)
+        if "CERTIFICATE_VERIFY_FAILED" in err_str or "SSL" in err_str:
+            try:
+                with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers, verify=False) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        logger.info(f"HTTP GET (SSL relaxed) fetched {len(resp.text)} chars from {url}")
+                        return resp.text
+            except Exception as e2:
+                logger.warning(f"HTTP GET relaxed SSL also failed for {url}: {e2}")
+        else:
+            logger.error(f"HTTP fetch error for {url}: {e}")
     return None
+
+
+BOT_CHALLENGE_RE = re.compile(
+    r'(<title>\s*(?:Client Challenge|Access Denied|Attention Required|Just a moment\.\.\.|Security Check|Cloudflare).*?</title>|'
+    r'enable javascript and cookies to continue|cf-browser-verification|challenge-platform|'
+    r'Checking if the site connection is secure)',
+    re.IGNORECASE
+)
+
+
+def _is_bot_challenge_page(content: str) -> bool:
+    """Detects anti-bot/Cloudflare challenge or captcha barrier pages."""
+    if not content:
+        return False
+    # Only check if content is small (challenges are typically < 15,000 chars)
+    if len(content) < 20000 and BOT_CHALLENGE_RE.search(content):
+        return True
+    return False
 
 
 def fetch_url(url: str, timeout: int = 15) -> str:
     """Fetch website content via Obscura first, falling back to HTTP client."""
+    if _is_binary_url(url):
+        logger.debug(f"Skipping binary URL: {url}")
+        return ""
+
     content = _fetch_via_obscura(url, timeout=timeout)
-    if content:
+    if content and not _is_bot_challenge_page(content):
         return content
     
-    content = _fetch_via_http(url, timeout=timeout)
-    return content or ""
+    if content and _is_bot_challenge_page(content):
+        logger.warning(f"Discarding bot challenge page from Obscura for {url}")
+        content = None
+
+    http_content = _fetch_via_http(url, timeout=timeout)
+    if http_content and not _is_bot_challenge_page(http_content):
+        return http_content
+    elif http_content and _is_bot_challenge_page(http_content):
+        logger.warning(f"Discarding bot challenge page from HTTP for {url}")
+
+    return ""
 
 
 def fetch_urls_parallel(

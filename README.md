@@ -1,4 +1,4 @@
-# 🔬 Researcher — Autonomous Deep Textual Research Engine & MCP Server
+# Researcher — Autonomous Deep Textual Research Engine & MCP Server
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP Compliant](https://img.shields.io/badge/MCP-Standard%202024--11--05-orange.svg)](https://modelcontextprotocol.io/)
@@ -16,6 +16,7 @@ Designed as both a **standalone CLI / Python library** and a **plug-and-play std
 - [Architecture Overview](#-architecture-overview)
 - [Key Features & Guardrails](#-key-features--guardrails)
 - [Repository Structure](#-repository-structure)
+- [Dedicated LLM Subsystem](#-dedicated-llm-subsystem)
 - [Core Components](#-core-components)
 - [Installation & Setup](#-installation--setup)
 - [Usage Guide](#-usage-guide)
@@ -41,12 +42,13 @@ flowchart TD
     Cleaner --> TempManager["4. temp_manager.py<br/>(Staging in Temp/<topic>/)"]
     
     subgraph Iterative Synthesis Loop
-        TempManager -->|Doc 1| Synthesizer["5. synthesizer.py<br/>(Deep Theory, Discrepancies, Quotes, LaTeX)"]
+        LLMManager["llm_manager.py<br/>(SmolLM2-1.7B Q8_0 Warm Load)"] -->|Active Session| Synthesizer["5. synthesizer.py<br/>(Deep Theory, Discrepancies, Quotes, LaTeX)"]
+        TempManager -->|Doc 1, 2, 3...| Synthesizer
         Synthesizer --> Vault["6. obsidian.py<br/>(Thread-Locked Vault Storage & [[Wikilinks]])"]
         Vault -->|Updated Master Note| Synthesizer
-        TempManager -->|Doc 2, 3...| Synthesizer
     end
     
+    Synthesizer -->|Research Complete| Unload["llm_manager.unload()<br/>(RAM Freed)"]
     Vault --> Showcase["7. showcase.py<br/>(Interactive HTML Report & Standalone PDF)"]
     Showcase --> TempCleanup["8. Temp Staging Cleanup<br/>(Exports & Notes Preserved)"]
 ```
@@ -84,8 +86,11 @@ flowchart TD
 
 ```
 Researcher/
-├── .gitignore             # Ignores Vault/, Temp/, logs/, pycache
+├── .gitignore             # Ignores Vault/, Temp/, models/, logs/, bin/, pycache
 ├── README.md              # Complete technical documentation
+├── download_model.py      # Downloader for SmolLM2-1.7B-Instruct-Q8_0.gguf
+├── context_limiter.py     # Semantic context chunking and CPU acceleration
+├── llm_manager.py         # Dedicated LLM manager (persistent load, ChatML, synthesis)
 ├── logger.py              # Stderr + rotating file logger (protects MCP stdio)
 ├── collector.py           # Stage 1: Link harvesting and relevance discovery
 ├── scraper.py             # Stage 2: Headless Obscura / HTTP scraping
@@ -97,11 +102,37 @@ Researcher/
 ├── pipeline.py            # Master orchestrator coordinating Stages 1-7
 ├── cli.py                 # Terminal CLI entrypoint
 ├── server.py              # Standalone stdio MCP server (JSON-RPC)
-├── test_researcher.py     # Comprehensive automated test suite
-├── bin/                   # Optional local stealth binaries (e.g. obscura.exe)
-├── Exports/               # Permanent HTML and PDF reports
-└── Vault/                 # Obsidian notes & Knowledge Graph (auto-created)
+├── models/                # Local GGUF models (e.g. SmolLM2 Q8_0, ignored)
+├── Exports/               # Permanent HTML and PDF reports (ignored)
+└── Vault/                 # Obsidian notes & Knowledge Graph (auto-created, ignored)
 ```
+
+---
+
+## Dedicated LLM Subsystem
+
+Researcher uses a completely decoupled local LLM subsystem powered by **SmolLM2-1.7B-Instruct-GGUF (q8_0)**:
+
+- **Model**: `bartowski/SmolLM2-1.7B-Instruct-GGUF` (`SmolLM2-1.7B-Instruct-Q8_0.gguf`)
+- **Key Parameters**:
+  - `n_ctx = 8192` (full 8k token context window)
+  - `n_batch = 1024`
+  - `n_threads = 4`
+  - `type_k = GGML_TYPE_Q8_0` (8-bit KV cache for high fidelity)
+  - `type_v = GGML_TYPE_Q8_0` (8-bit KV cache for high fidelity)
+  - `flash_attn = True`
+  - `verbose = False`
+  - `temperature = 0.2`
+  - `min_p = 0.05`
+- **Smart Lifecycle Management**:
+  - The model is loaded into RAM once at the start of the sequential synthesis loop.
+  - Remains warm across all staged documents and chunks.
+  - Automatically unloads from RAM (`llm_manager.unload()`) in a `finally` block when the research run finishes, releasing ~2 GB of memory back to the operating system and ALFRED.
+- **`ResearchContextManager`**:
+  - Builds structured ChatML (`<|im_start|>`) prompts.
+  - Enforces domain guardrails, LaTeX mathematical rigor (`$$...$$` and `$..$`), Markdown property tables, primary blockquote retention, and Obsidian wikilinks.
+- **`ResearchSynthesizer`**:
+  - Executes local inference with specified sampling bounds and cleans trailing incomplete tokens.
 
 ---
 
@@ -129,18 +160,23 @@ Researcher/
 - **`load_all_staged()`**: Orders staged files so root/main topic pages are synthesized prior to sublinks.
 - **`clear()`**: Safe recursive deletion of temporary staging artifacts upon pipeline finish.
 
-### 5. `synthesizer.py` (Stage 5)
+### 5. `llm_manager.py` (LLM Subsystem)
+- **`ResearcherLLM`**: Singleton managing SmolLM2-1.7B-Instruct-Q8_0 with 8192 context window, 4 threads, flash attention, and Q8_0 KV cache. Loads once for research session, unloads to free RAM on completion.
+- **`ResearchContextManager`**: Builds ChatML prompt with strict scientific guardrails, LaTeX math rules, property tables, and blockquotes.
+- **`ResearchSynthesizer`**: Runs inference with temperature=0.2 and min_p=0.05, sanitizing output and balancing math fences.
+
+### 6. `synthesizer.py` (Stage 5)
 - **`synthesize_and_update(topic, new_doc, note_title)`**: Feeds each new document into the LLM alongside the existing Obsidian note to iteratively expand depth.
 - **`build_system_prompt()`**: Injects non-negotiable rules for first-principles explanation, KaTeX math blocks, and quote retention.
 - **`detect_conflicts(old_text, new_text)`**: Inspects numerical facts and dates to populate `## Discrepancies`.
 
-### 6. `obsidian.py` (Stage 6)
+### 7. `obsidian.py` (Stage 6)
 - **`ObsidianVault(vault_path)`**: Thread-safe vault driver using file-level mutexes (`filelock`).
 - **`store_note(...)`**: Generates YAML frontmatter, tags, metadata, and writes markdown notes.
 - **`update_knowledge_graph_index(...)`**: Maintains `Knowledge_Graph.md` tracking graph connections across all notes.
 - **`query_vault(search_query)`**: Full-text keyword search across all `.md` files in the vault.
 
-### 7. `showcase.py` (Stage 7)
+### 8. `showcase.py` (Stage 7)
 - **`generate_web_view(note_title, auto_open, create_pdf)`**:
   - Compiles note markdown, LaTeX formulas, discrepancy tables, and reference links into a responsive, clean single-page HTML report.
   - Generates standalone, print-perfect PDFs using headless Google Chrome or Microsoft Edge with zero orphan page breaks.
@@ -167,6 +203,15 @@ pip install -r requirements.txt
 httpx>=0.27.0
 filelock>=3.13.0
 orjson>=3.9.0
+llama-cpp-python>=0.3.0
+huggingface_hub>=0.20.0
+```
+
+### 2. Download SmolLM2 Model (q8_0)
+Download the dedicated research model (`SmolLM2-1.7B-Instruct-Q8_0.gguf`, ~1.8 GB) into `Researcher/models/`:
+
+```bash
+python Researcher/download_model.py
 ```
 
 ---
@@ -258,6 +303,7 @@ python server.py
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `deep_research` | `topic` *(string, required)*<br/>`max_sites` *(int, default 3)* | Executes complete deep research pipeline, writes to Obsidian Vault, cleans staging, and creates exports. |
+| `terminate_research` | `topic` *(string, optional)* | Terminates background research, unloads the model from RAM to free memory, and cleans topic Temp files (or all Temp files). |
 | `list_vault_notes` | *None* | Lists all research notes present in the Obsidian Vault. |
 | `read_vault_note` | `note_title` *(string, required)* | Retrieves raw Markdown content of a specific note from the vault. |
 
@@ -332,18 +378,9 @@ Generated reports in `Exports/` are built for maximum readability and executive 
 
 ---
 
-## Testing
+## Testing & Validation
 
-Researcher comes with a full automated test suite verifying link collection, boilerplate stripping, Obsidian thread locking, and end-to-end synthesis:
-
-```bash
-# Run all tests
-python -m unittest Researcher.test_researcher
-
-# Or run specific test cases
-python -m unittest Researcher.test_researcher.TestResearcherModule.test_function_1_link_collector
-python -m unittest Researcher.test_researcher.TestResearcherModule.test_function_4_obsidian_storage_and_locking
-```
+The Researcher subsystem components support testing and validation across link collection, boilerplate stripping, Obsidian thread locking, and end-to-end multi-site synthesis pipelines. Test suites can be executed locally during verification.
 
 ---
 
@@ -353,6 +390,7 @@ Researcher can be configured via environment variables or direct arguments:
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
+| `RESEARCHER_MODEL_PATH` | `Researcher/models/SmolLM2-1.7B-Instruct-Q8_0.gguf` | Path to local GGUF model for synthesis. |
 | `RESEARCHER_VAULT_DIR` | `./Vault` or `../Vault` | Absolute path to the destination Obsidian Vault. |
 | `RESEARCHER_MAX_WORDS` | `45000` | Word ceiling to respect LLM context budgets (e.g. 64k tokens). |
 | `OBSCURA_BIN_PATH` | `./bin/obscura.exe` | Path to local Obscura stealth browser executable. |

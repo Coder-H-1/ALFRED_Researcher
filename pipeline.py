@@ -4,12 +4,13 @@ Coordinates all functions:
 1. Link collection & relevance discovery (collector.py)
 2. Scraping, sub-topic harvesting, & parallel fetching (scraper.py)
 3. Cleaning & boilerplate stripping (cleaner.py)
-4. Temporary staging in FILES/Researcher/Temp (temp_manager.py)
+4. Temporary staging in Researcher/Temp (temp_manager.py)
 5. One-by-one iterative LLM synthesis with 64k token budget & deep theory (synthesizer.py)
 6. Thread-locked Obsidian storage & graph linking (obsidian.py)
 7. Global retrieval & presentation showcase (showcase.py)
 """
 
+import os
 import time
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -25,13 +26,31 @@ except (ImportError, ValueError):
         import logging
         logger = logging.getLogger(__name__)
 
-from .collector import collect_links, filter_relevant_sublinks
+from .collector import collect_links, filter_relevant_sublinks, clean_url
 from .scraper import fetch_url, fetch_urls_parallel
 from .cleaner import format_research_note
 from .temp_manager import TempResearchStorage
 from .synthesizer import synthesize_and_update
 from .showcase import generate_web_view
 from .obsidian import global_fetch_obsidian_data, _DEFAULT_VAULT
+
+try:
+    from .llm_manager import (
+        ResearcherLLM,
+        get_researcher_llm,
+        unload_researcher_llm
+    )
+except (ImportError, ValueError):
+    try:
+        from llm_manager import (
+            ResearcherLLM,
+            get_researcher_llm,
+            unload_researcher_llm
+        )
+    except Exception:
+        ResearcherLLM = None
+        get_researcher_llm = None
+        unload_researcher_llm = None
 
 
 class ResearchPipeline:
@@ -58,7 +77,7 @@ class ResearchPipeline:
         1. Collects primary target links (Function 1).
         2. Fetches each primary page and extracts relevant on-page sublinks.
         3. Parallel-fetches referenced sub-topics.
-        4. Staged all data into FILES/Researcher/Temp/<topic>/.
+        4. Staged all data into Researcher/Temp/<topic>/.
         5. Feeds staged files into LLM synthesizer one-by-one to build deep, well-linked Obsidian notes.
         6. Generates Showcase reports (HTML + PDF).
         """
@@ -101,8 +120,12 @@ class ResearchPipeline:
             )
             staged_count += 1
 
-            # Discover and parallel-fetch relevant on-page sublinks
-            candidate_sublinks = cleaned_doc.get("referenced_links", [])
+            # Discover and parallel-fetch relevant on-page sublinks (excluding parent page)
+            parent_clean = clean_url(url)
+            candidate_sublinks = [
+                item for item in cleaned_doc.get("referenced_links", [])
+                if clean_url(item.get("url", "")) and clean_url(item.get("url", "")) != parent_clean
+            ]
             relevant_sublinks = filter_relevant_sublinks(
                 candidate_sublinks, 
                 topic=self.topic, 
@@ -141,14 +164,29 @@ class ResearchPipeline:
         logger.info(f"\n--- [Stage 2: Sequential Synthesis] Processing {len(staged_docs)} staged docs from Temp ---")
 
         processed_notes = []
-        for idx, doc in enumerate(staged_docs, start=1):
-            logger.info(f"Synthesizing staged doc {idx}/{len(staged_docs)}: '{doc.get('title')}'")
-            saved_note_path = synthesize_and_update(
-                topic=self.topic,
-                new_doc=doc,
-                note_title=self.note_title
-            )
-            processed_notes.append(saved_note_path)
+        try:
+            # Smart warm load: load model once for whole research session
+            if get_researcher_llm:
+                logger.info("Initializing dedicated Researcher LLM (SmolLM2) for session...")
+                get_researcher_llm()
+
+            for idx, doc in enumerate(staged_docs, start=1):
+                if "source" not in doc and "url" in doc:
+                    doc["source"] = doc["url"]
+                logger.info(f"Synthesizing staged doc {idx}/{len(staged_docs)}: '{doc.get('title')}'")
+                saved_note_path = synthesize_and_update(
+                    topic=self.topic,
+                    new_doc=doc,
+                    note_title=self.note_title,
+                    doc_index=idx,
+                    temp_storage=self.temp_storage
+                )
+                processed_notes.append(saved_note_path)
+        finally:
+            # Unload model after the whole research is done to free memory
+            if unload_researcher_llm:
+                logger.info("Research synthesis complete. Unloading Researcher LLM and freeing memory...")
+                unload_researcher_llm()
 
         # Step 5: Showcase web view & PDF generation
         report_res = None
@@ -157,12 +195,12 @@ class ResearchPipeline:
         except Exception as e:
             logger.error(f"Failed to generate showcase web view: {e}")
 
-        # Step 6: Post-research temp cleanup (keeping all permanent Exports)
+        # Step 6: Post-research temp staging preservation (kept for audit & multi-source evidence)
         try:
-            self.temp_storage.clear()
-            logger.info(f"Cleaned up temporary staging files for topic '{self.topic}'.")
+            self.temp_storage.clear(force=False)
+            logger.info(f"Staged temporary research files preserved in: {self.temp_storage.topic_dir}")
         except Exception as e:
-            logger.warning(f"Failed to clear temp files: {e}")
+            logger.warning(f"Failed in temp storage handler: {e}")
 
         elapsed = round(time.time() - start_time, 2)
         logger.info(f"=== Completed Research in {elapsed}s. Report: {report_res} ===")
@@ -210,13 +248,22 @@ class ResearchPipeline:
         staged_docs = self.temp_storage.load_all_staged()
         logger.info(f"Staged {len(staged_docs)} documents into Temp. Beginning sequential synthesis.")
 
-        for idx, doc in enumerate(staged_docs, start=1):
-            logger.info(f"Synthesizing source {idx}/{len(staged_docs)} into Obsidian vault...")
-            synthesize_and_update(
-                topic=self.topic,
-                new_doc=doc,
-                note_title=self.note_title
-            )
+        try:
+            if get_researcher_llm:
+                logger.info("Initializing dedicated Researcher LLM (SmolLM2) for parallel-staged session...")
+                get_researcher_llm()
+
+            for idx, doc in enumerate(staged_docs, start=1):
+                logger.info(f"Synthesizing source {idx}/{len(staged_docs)} into Obsidian vault...")
+                synthesize_and_update(
+                    topic=self.topic,
+                    new_doc=doc,
+                    note_title=self.note_title
+                )
+        finally:
+            if unload_researcher_llm:
+                logger.info("Research synthesis complete. Unloading Researcher LLM and freeing memory...")
+                unload_researcher_llm()
 
         report_res = generate_web_view(self.note_title, auto_open=auto_open_report, create_pdf=True)
         return {
