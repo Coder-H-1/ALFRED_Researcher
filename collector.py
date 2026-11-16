@@ -6,6 +6,9 @@ Collects, discovers, filters target links, and discovers relevant on-page sub-to
 import os
 import re
 import urllib.parse
+import subprocess
+import shutil
+import base64
 from typing import List, Dict, Optional
 import httpx
 
@@ -33,6 +36,33 @@ STOP_WORDS = {
     "chapter", "session", "questions", "question", "guide", "guides",
     "part", "textbook", "textbooks", "grade", "syllabus", "edition"
 }
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _find_obscura_bin() -> Optional[str]:
+    candidates = [
+        os.path.join(CURRENT_DIR, "bin", "obscura.exe"),
+        os.path.join(os.path.dirname(CURRENT_DIR), "FILES", "bin", "obscura.exe"),
+        os.path.join(os.path.dirname(CURRENT_DIR), "bin", "obscura.exe"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    found = shutil.which("obscura.exe")
+    return found if (found and os.path.isfile(found)) else None
+
+
+def _decode_bing_url(u_param: str) -> Optional[str]:
+    """Decodes Bing redirect parameter u=a1<base64> to extract the real destination URL."""
+    try:
+        raw = u_param[2:] if u_param.startswith("a1") else u_param
+        # Support urlsafe base64 characters
+        raw = raw.replace("-", "+").replace("_", "/")
+        raw += "=" * ((4 - len(raw) % 4) % 4)
+        decoded = base64.b64decode(raw).decode("utf-8", errors="ignore")
+        return decoded if decoded.startswith("http") else None
+    except Exception:
+        return None
 
 
 def is_valid_url(url: str) -> bool:
@@ -177,48 +207,151 @@ def filter_relevant_sublinks(
 
 def collect_links_from_search(query: str, max_results: int = 5) -> List[str]:
     """
-    Search DuckDuckGo HTML endpoint without external API dependencies.
-    Extracts relevant result links.
+    Search DuckDuckGo using multi-tier resilient collection:
+    1. Local Obscura browser with stealth mode to bypass bot/Cloudflare challenges.
+    2. DuckDuckGo Lite POST endpoint fallback.
+    3. DuckDuckGo HTML GET fallback.
     """
     logger.info(f"Collecting links for query: '{query}' (limit {max_results})")
-    encoded_query = urllib.parse.quote_plus(query)
-    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-
     urls: List[str] = []
-    resp = None
-    try:
-        with httpx.Client(timeout=10.0, follow_redirects=True, headers=headers) as client:
-            resp = client.get(search_url)
-            if resp.status_code == 200:
-                # Find uddg redirect links or regular hrefs
-                matches = re.findall(r'uddg=([^&"\s]+)', resp.text)
-                for m in matches:
-                    decoded = urllib.parse.unquote(m)
-                    if is_valid_url(decoded) and "duckduckgo.com" not in decoded:
-                        cleaned = clean_url(decoded)
-                        if cleaned not in urls:
+
+    # Tier 1: Local Obscura engine with stealth
+    obscura_bin = _find_obscura_bin()
+    if obscura_bin and os.path.isfile(obscura_bin):
+        try:
+            encoded_query = urllib.parse.quote_plus(query)
+            search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+            cmd = [
+                obscura_bin,
+                "fetch",
+                search_url,
+                "--dump", "links",
+                "--stealth",
+                "-q"
+            ]
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                creationflags=creationflags
+            )
+            if res.returncode == 0 and res.stdout:
+                for line in res.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    target_url = None
+                    if "uddg=" in line:
+                        m = re.search(r'uddg=([^&\s\t]+)', line)
+                        if m:
+                            target_url = urllib.parse.unquote(m.group(1))
+                    elif line.startswith("http://") or line.startswith("https://"):
+                        target_url = line.split("\t")[0].split()[0]
+
+                    if target_url and is_valid_url(target_url) and "duckduckgo.com" not in target_url:
+                        cleaned = clean_url(target_url)
+                        if cleaned and cleaned not in urls:
                             urls.append(cleaned)
                             if len(urls) >= max_results:
                                 break
-    except Exception as e:
-        logger.error(f"Search request failed: {e}")
+            if urls:
+                logger.info(f"Obscura collected {len(urls)} links for '{query}'")
+        except Exception as e:
+            logger.warning(f"Obscura link extraction failed: {e}")
 
-    # Fallback pattern if uddg wasn't present
-    if not urls and resp and resp.text:
-        links = re.findall(r'href=[\'"](https?://[^\'"]+)[\'"]', resp.text)
-        for link in links:
-            if is_valid_url(link) and not any(skip in link for skip in ["duckduckgo.com", "bing.com", "google.com"]):
-                cleaned = clean_url(link)
-                if cleaned not in urls:
-                    urls.append(cleaned)
-                    if len(urls) >= max_results:
-                        break
+    # Tier 2: Bing HTML search with base64 redirect extraction
+    if len(urls) < max_results:
+        try:
+            encoded_query = urllib.parse.quote_plus(query)
+            bing_url = f"https://www.bing.com/search?q={encoded_query}"
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+            with httpx.Client(timeout=10.0, follow_redirects=True, headers=headers) as client:
+                resp = client.get(bing_url)
+                if resp.status_code == 200 and resp.text:
+                    bing_u_matches = re.findall(r'(?:[?&]|&amp;)u=([a-zA-Z0-9_\-]+)', resp.text)
+                    for u_match in bing_u_matches:
+                        real_url = _decode_bing_url(u_match)
+                        if real_url and is_valid_url(real_url) and not any(skip in real_url for skip in ["bing.com", "microsoft.com"]):
+                            cleaned = clean_url(real_url)
+                            if cleaned and cleaned not in urls:
+                                urls.append(cleaned)
+                                if len(urls) >= max_results:
+                                    break
+            if urls:
+                logger.info(f"Total links after Bing fallback: {len(urls)}")
+        except Exception as e:
+            logger.warning(f"Bing search fallback failed: {e}")
+
+    # Tier 3: DuckDuckGo Lite POST
+    if len(urls) < max_results:
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+            with httpx.Client(timeout=10.0, follow_redirects=True, headers=headers) as client:
+                resp = client.post("https://lite.duckduckgo.com/lite/", data={"q": query})
+                if resp.status_code == 200 and resp.text:
+                    found_hrefs = re.findall(r'href=[\'"]([^\'"]+)[\'"]', resp.text)
+                    for h in found_hrefs:
+                        target_url = None
+                        if "uddg=" in h:
+                            m = re.search(r'uddg=([^&"\'\s]+)', h)
+                            if m:
+                                target_url = urllib.parse.unquote(m.group(1))
+                        elif h.startswith("http://") or h.startswith("https://"):
+                            if "duckduckgo.com" not in h:
+                                target_url = h
+
+                        if target_url and is_valid_url(target_url) and "duckduckgo.com" not in target_url:
+                            cleaned = clean_url(target_url)
+                            if cleaned and cleaned not in urls:
+                                urls.append(cleaned)
+                                if len(urls) >= max_results:
+                                    break
+            if urls:
+                logger.info(f"Total links after DDG Lite: {len(urls)}")
+        except Exception as e:
+            logger.warning(f"DDG Lite search failed: {e}")
+
+    # Tier 3: Standard DDG HTML GET fallback
+    if len(urls) < max_results:
+        try:
+            encoded_query = urllib.parse.quote_plus(query)
+            search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            }
+            with httpx.Client(timeout=10.0, follow_redirects=True, headers=headers) as client:
+                resp = client.get(search_url)
+                if resp.status_code == 200 and resp.text:
+                    matches = re.findall(r'uddg=([^&"\s]+)', resp.text)
+                    for m in matches:
+                        decoded = urllib.parse.unquote(m)
+                        if is_valid_url(decoded) and "duckduckgo.com" not in decoded:
+                            cleaned = clean_url(decoded)
+                            if cleaned not in urls:
+                                urls.append(cleaned)
+                                if len(urls) >= max_results:
+                                    break
+        except Exception as e:
+            logger.warning(f"DDG HTML search failed: {e}")
 
     return urls
 
