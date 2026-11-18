@@ -11,8 +11,23 @@ Designed as both a **standalone CLI / Python library** and a **plug-and-play std
 
 ---
 
+## 📖 About Researcher
+
+**Researcher** is an autonomous deep research engine engineered to solve the primary failure modes of AI-assisted investigation: hallucinated consensus, context saturation, superficial summaries, and anti-bot search blocks.
+
+Unlike conventional search-and-summarize scripts that condense entire websites into lossy bullet points, Researcher acts as an automated investigative analyst:
+- **Resilient Multi-Tier Harvesting**: Bypasses bot verification and Cloudflare challenges using Obscura's embedded V8 stealth browser engine backed by Bing base64 search fallback, requiring zero cloud search API subscriptions.
+- **Truth Preservation & Discrepancy Tracking**: Explicitly catalogs conflicting numbers, historical dates, and rival scientific claims into a dedicated `## Discrepancies` ledger with primary source attribution, eliminating false AI consensus.
+- **Mathematical & First-Principles Rigor**: Extracts formulas and renders them in KaTeX/LaTeX (`$$...$$`), standardizing metric units, variable definitions, and step-by-step mathematical reasoning.
+- **Persistent Knowledge Graphing**: Ingests findings directly into an Obsidian markdown vault using bidirectional `[[Wikilinks]]` and dynamic graph maps (`Knowledge_Graph.md`), enabling persistent long-term knowledge accumulation across sessions.
+- **Publication-Ready Outputs**: Automatically formats, typesets, and renders publication-quality HTML and printable PDF executive dossiers using headless Chrome.
+- **Universal Dual Interface**: Functions both as an interactive/batch CLI tool and as a compliant **Model Context Protocol (MCP)** server for Claude Desktop, Cursor, Antigravity, and ALFRED.
+
+---
+
 ## Table of Contents
 
+- [About Researcher](#-about-researcher)
 - [Architecture Overview](#-architecture-overview)
 - [Key Features & Guardrails](#-key-features--guardrails)
 - [Repository Structure](#-repository-structure)
